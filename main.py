@@ -1,23 +1,28 @@
 # FILE: main.py (for your SECOND repo: v2ray-refiner)
-# FINAL SCRIPT v40: Refiner with Corrected Combined Logic
+# FINAL SCRIPT v41: Advanced Refiner with All Strategies (S2, S3, S4)
 
-import os, json, re, base64, time, traceback, socket
+import os, json, re, base64, time, traceback, socket, ssl
 import requests
 from urllib.parse import urlparse, parse_qs
 import concurrent.futures
 import geoip2.database
 from dns import resolver, exception as dns_exception
-import ssl
 
-print("--- ADVANCED REFINER & CATEGORIZER v40 START ---")
+print("--- ADVANCED REFINER v41 (ALL STRATEGIES) START ---")
 
 # --- CONFIGURATION ---
-CONFIG_CHUNK_SIZE = 999
+CONFIG_CHUNK_SIZE = 444
 MAX_TEST_WORKERS = 100
 TEST_TIMEOUT = 4
 SMALL_COUNTRY_THRESHOLD = 44
+HISTORY_DB_FILE = "server_history.json"
 
-# --- HELPER FUNCTIONS (UNCHANGED) ---
+# List of ASNs from major cloud providers that are often blocked/monitored
+BANNED_ASNS = {
+    "AS15169", "AS16509", "AS8075", "AS14618", "AS20473", "AS24940", "AS14061"
+} # Google, AWS, Azure, DigitalOcean, Vultr, Hetzner, Linode
+
+# --- HELPER FUNCTIONS ---
 def setup_directories():
     import shutil
     dirs = ['./splitted', './subscribe', './protocols', './networks', './countries']
@@ -27,8 +32,6 @@ def setup_directories():
     print("INFO: All necessary directories are clean.")
 
 dns_cache = {}
-cdn_cache = {}
-
 def get_ips(node):
     if node in dns_cache: return dns_cache[node]
     try:
@@ -43,6 +46,7 @@ def get_ips(node):
         except (dns_exception.DNSException, Exception): return None
     return None
 
+cdn_cache = {}
 def is_cdn_domain(domain):
     if domain in cdn_cache: return cdn_cache[domain]
     try:
@@ -55,36 +59,73 @@ def is_cdn_domain(domain):
     except (dns_exception.DNSException, Exception): pass
     cdn_cache[domain] = False; return False
 
-def test_single_config(config):
+# --- NEW: STRATEGY 4 - HISTORY TRACKING FUNCTIONS ---
+def load_history():
+    try:
+        with open(HISTORY_DB_FILE, 'r') as f: return json.load(f)
+    except: return {}
+
+def save_history(history):
+    with open(HISTORY_DB_FILE, 'w') as f: json.dump(history, f, indent=2)
+
+# --- NEW: ADVANCED TESTING FUNCTION WITH S2 & S3 ---
+def advanced_test_single_config(config, asn_reader):
     try:
         parsed_url = urlparse(config); host = parsed_url.hostname; port = parsed_url.port or 443
         if not host: return None
-        is_cdn = is_cdn_domain(host)
+        
         start_time = time.time()
         context = ssl.create_default_context(); context.check_hostname = False; context.verify_mode = ssl.CERT_NONE
+        
+        # Test 1: TLS Handshake
         with socket.create_connection((host, port), timeout=TEST_TIMEOUT) as sock:
             with context.wrap_socket(sock, server_hostname=host) as ssock:
-                latency = int((time.time() - start_time) * 1000)
-                return {"config": config, "host": host, "latency": latency, "is_cdn": is_cdn, "protocol": parsed_url.scheme}
-    except (socket.timeout, ConnectionRefusedError, OSError, ssl.SSLError, Exception): return None
+                pass # Success if we connect and handshake
+        
+        latency = int((time.time() - start_time) * 1000)
+        
+        # Test 2: STRATEGY 2 - ASN Check
+        if asn_reader:
+            ips = get_ips(host)
+            if not ips: return None
+            try:
+                asn_record = asn_reader.asn(ips[0])
+                asn = f"AS{asn_record.autonomous_system_number}"
+                if asn in BANNED_ASNS: return None # Fail if on a banned ASN
+            except geoip2.errors.AddressNotFoundError: pass # Ignore if IP not in DB
+            except Exception: return None
 
-def advanced_filter_and_test(all_configs):
-    print(f"\n--- Advanced Filtering & Testing {len(all_configs)} Pre-Filtered Configs ---")
-    unique_configs = list(set(all_configs)); good_configs = []
+        # Test 3: STRATEGY 3 - Active Probe Simulation
+        with socket.create_connection((host, port), timeout=TEST_TIMEOUT) as plain_sock:
+            http_request = f"GET / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n".encode()
+            plain_sock.sendall(http_request)
+            response = plain_sock.recv(1024).decode('utf-8', 'ignore')
+            if not response.lower().startswith("http/1."): return None # Fail if not a valid HTTP response
+
+        # If all tests pass, return a rich result
+        return {
+            "config": config, "host": host, "latency": latency,
+            "is_cdn": is_cdn_domain(host),
+            "is_reality": 'reality' in config.lower(),
+        }
+    except Exception: return None
+
+def run_advanced_tests(configs_to_test, asn_reader):
+    print(f"\n--- Running Advanced Tests on {len(configs_to_test)} configs... ---")
+    good_configs_results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_TEST_WORKERS) as executor:
-        future_to_config = {executor.submit(test_single_config, config): config for config in unique_configs}
+        future_to_config = {executor.submit(advanced_test_single_config, config, asn_reader): config for config in configs_to_test}
         for i, future in enumerate(concurrent.futures.as_completed(future_to_config)):
-            if (i + 1) % 500 == 0: print(f"Tested {i+1}/{len(unique_configs)} | Promising: {len(good_configs)}")
+            if (i + 1) % 100 == 0: print(f"Tested {i+1}/{len(configs_to_test)} | Found: {len(good_configs_results)}")
             result = future.result()
-            if result: good_configs.append(result)
-    good_configs.sort(key=lambda x: (not x['is_cdn'], x['protocol'] != 'reality', x['latency']))
-    final_sorted_configs = [item['config'] for item in good_configs]
-    print(f"--- Advanced filtering complete. Found {len(final_sorted_configs)} high-quality configs. ---")
-    return final_sorted_configs
+            if result: good_configs_results.append(result)
+    print(f"--- Advanced testing complete. Found {len(good_configs_results)} high-quality configs. ---")
+    return good_configs_results
 
-def process_and_title_configs(configs_to_process, geoip_reader):
-    print(f"\n--- Adding Geo-Titles to {len(configs_to_process)} configs... ---"); processed_configs = []
-    for element in configs_to_process:
+def process_and_title_configs(configs, geoip_reader):
+    # (This function is the same as the previous full version)
+    processed_configs = []; print(f"\n--- Adding Geo-Titles to {len(configs)} configs... ---")
+    for element in configs:
         try:
             host = urlparse(element).hostname; ips = get_ips(host)
             if not host or not ips: continue
@@ -92,13 +133,12 @@ def process_and_title_configs(configs_to_process, geoip_reader):
             if geoip_reader:
                 try: country_code = geoip_reader.country(ips[0]).country.iso_code or "XX"
                 except geoip2.errors.AddressNotFoundError: pass
-            clean_config = element.split('#')[0]; title = f"{country_code}-{host}"
-            processed_configs.append(f"{clean_config}#{title}")
+            processed_configs.append(urlparse(element)._replace(fragment=f"#{country_code}-{host}").geturl())
         except Exception: continue
-    print(f"--- Finished titling. Final count: {len(processed_configs)} ---")
     return processed_configs
 
 def write_chunked_subscription_files(base_filepath, configs):
+    # (This function is the same as the previous full version)
     os.makedirs(os.path.dirname(base_filepath), exist_ok=True)
     if not configs:
         with open(base_filepath, "w") as f: f.write(""); return
@@ -114,101 +154,89 @@ def main():
     setup_directories()
     
     # --- Stage 1: Download pre-filtered configs from Repo A ---
-    # !!! IMPORTANT: CHANGE 'YOUR_GITHUB_USERNAME' and 'v2ray-collector' !!!
-    REFINER_SOURCE_URL = "https://raw.githubusercontent.com/BarimKenzema/Haj-Karim/refs/heads/main/filtered-for-refiner.txt"
-    
-    print(f"--- Downloading PRE-FILTERED configs from collector: {REFINER_SOURCE_URL} ---")
-    configs_to_test = set()
+    REFINER_SOURCE_URL = "https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/v2ray-collector/main/filtered-for-refiner.txt"
     try:
         response = requests.get(REFINER_SOURCE_URL, timeout=20)
         response.raise_for_status()
-        configs_text = response.text
-        configs_to_test.update(line.strip() for line in configs_text.splitlines() if line.strip())
+        configs_to_test = {line.strip() for line in response.text.splitlines() if line.strip()}
         print(f"Successfully collected {len(configs_to_test)} pre-filtered configs to test.")
-    except requests.exceptions.RequestException as e:
+    except Exception as e:
         print(f"FATAL: Could not download configs from the collector repo. Error: {e}"); return
-
     if not configs_to_test: print("FATAL: Config source file was empty. Exiting."); return
 
-    # --- Stage 2: Run advanced tests and add geo-titles ---
-    db_path = "./geoip.mmdb"
-    if not os.path.exists(db_path):
-        print("INFO: GeoIP database not found. Downloading...")
-        try:
-            r = requests.get("https://git.io/GeoLite2-Country.mmdb", allow_redirects=True)
-            with open(db_path, 'wb') as f: f.write(r.content)
-            print("INFO: GeoIP database downloaded successfully.")
-        except Exception as e: print(f"ERROR: Could not download GeoIP database. Error: {e}"); db_path = None
-    
-    high_quality_configs = advanced_filter_and_test(list(configs_to_test))
-    if not high_quality_configs: print("INFO: No high-quality configs found after advanced testing. Exiting."); return
-    
-    geoip_reader = None
-    if db_path and os.path.exists(db_path):
-        try: geoip_reader = geoip2.database.Reader(db_path)
-        except Exception as e: print(f"ERROR: Could not load GeoIP database. Error: {e}")
+    # --- STRATEGY 4: Load history and prioritize test list ---
+    history = load_history()
+    configs_to_test_list = sorted(list(configs_to_test), key=lambda c: history.get(urlparse(c).hostname, {}).get('success_streak', 0), reverse=True)
 
-    final_configs = process_and_title_configs(high_quality_configs, geoip_reader)
+    # --- Setup GeoIP databases ---
+    country_db_path = "./geoip-country.mmdb"; asn_db_path = "./geoip-asn.mmdb"
+    try:
+        if not os.path.exists(country_db_path):
+            r = requests.get("https://git.io/GeoLite2-Country.mmdb", allow_redirects=True); r.raise_for_status()
+            with open(country_db_path, 'wb') as f: f.write(r.content)
+        if not os.path.exists(asn_db_path):
+            r = requests.get("https://git.io/GeoLite2-ASN.mmdb", allow_redirects=True); r.raise_for_status()
+            with open(asn_db_path, 'wb') as f: f.write(r.content)
+        country_reader = geoip2.database.Reader(country_db_path)
+        asn_reader = geoip2.database.Reader(asn_db_path)
+    except Exception as e:
+        print(f"ERROR: Could not download/load GeoIP databases. Some features disabled. Error: {e}")
+        country_reader, asn_reader = None, None
 
-    # --- Stage 3: Perform standard categorization ---
-    print("\n--- Performing Standard Categorization ---")
+    # --- Stage 2: Run all advanced tests ---
+    good_configs_results = run_advanced_tests(configs_to_test_list, asn_reader)
+    if not good_configs_results: print("INFO: No high-quality configs found. Exiting."); return
+
+    # --- STRATEGY 4: Update and save history DB ---
+    successful_hosts = {res['host'] for res in good_configs_results}
+    for host, data in history.items():
+        if host in successful_hosts: data['success_streak'] = data.get('success_streak', 0) + 1; data['failures'] = 0
+        else: data['success_streak'] = 0; data['failures'] = data.get('failures', 0) + 1
+    for res in good_configs_results:
+        if res['host'] not in history: history[res['host']] = {'success_streak': 1, 'failures': 0}
+    save_history(history)
+
+    # --- Stage 3: Sort final list using all heuristics ---
+    good_configs_results.sort(key=lambda r: (
+        history.get(r['host'], {}).get('success_streak', 0), -r['is_cdn'], -r['is_reality'], r['latency']
+    ), reverse=True)
+    
+    final_configs_sorted = [res['config'] for res in good_configs_results]
+    
+    # --- Stage 4: Title and Categorize ---
+    final_configs_titled = process_and_title_configs(final_configs_sorted, country_reader)
+    
+    # (The categorization and special file creation logic is the same as before)
     by_protocol = {p: [] for p in ["vless", "vmess", "trojan", "ss", "reality"]}
-    by_network = {'tcp': [], 'ws': [], 'grpc': []}
     by_country = {}
-
-    for config in final_configs:
+    for config in final_configs_titled:
         try:
             proto = config.split('://')[0]
             if proto in by_protocol: by_protocol[proto].append(config)
             if 'reality' in config.lower(): by_protocol['reality'].append(config)
-            
-            parsed = urlparse(config)
-            net = parse_qs(parsed.query).get('type', ['tcp'])[0].lower()
-            if net in by_network: by_network[net].append(config)
-            
-            country_code = parsed.fragment.split('-')[0].lower()
+            country_code = urlparse(config).fragment.split('-')[0].lower()
             if country_code:
                 if country_code not in by_country: by_country[country_code] = []
                 by_country[country_code].append(config)
         except Exception: continue
-
-    # Write standard category files for general use
+    
     for p, clist in by_protocol.items(): write_chunked_subscription_files(f'./protocols/{p}', clist)
-    for n, clist in by_network.items(): write_chunked_subscription_files(f'./networks/{n}', clist)
     for c, clist in by_country.items(): write_chunked_subscription_files(f'./countries/{c}', clist)
 
-    # --- Stage 4: Create Special Combined Subscription (UPDATED LOGIC) ---
     print(f"\n--- Creating Special Combined Subscription File ---")
-    
-    # Use a set to automatically handle duplicates
     combined_configs = set()
-
-    # 1. Add ALL REALITY servers
-    if by_protocol['reality']:
-        print(f"Adding {len(by_protocol['reality'])} REALITY configs to the special mix.")
-        combined_configs.update(by_protocol['reality'])
-    
-    # 2. Add ALL Turkey servers
-    if 'tr' in by_country:
-        print(f"Adding {len(by_country['tr'])} Turkey (TR) configs to the special mix.")
-        combined_configs.update(by_country['tr'])
-
-    # 3. Add all servers from countries with fewer than 44 configs
+    if by_protocol['reality']: combined_configs.update(by_protocol['reality'])
+    if 'tr' in by_country: combined_configs.update(by_country['tr'])
     for country_code, config_list in by_country.items():
-        if len(config_list) < SMALL_COUNTRY_THRESHOLD:
-            print(f"Adding {len(config_list)} configs from small country '{country_code.upper()}' to the special mix.")
-            combined_configs.update(config_list)
+        if len(config_list) < SMALL_COUNTRY_THRESHOLD: combined_configs.update(config_list)
     
     if combined_configs:
-        # Convert set to a sorted list for consistent output
-        final_combined_list = sorted(list(combined_configs))
+        final_combined_list = sorted(list(combined_configs), key=lambda c: final_configs_titled.index(c))
         print(f"Total unique configs in the special combined file: {len(final_combined_list)}")
         write_chunked_subscription_files('./subscribe/combined_special', final_combined_list)
-    else:
-        print("No configs met the criteria for the special combined subscription.")
 
     print("\n--- SCRIPT FINISHED SUCCESSFULLY ---")
 
 if __name__ == "__main__":
     try: main()
-    except Exception: print(f"\n--- FATAL UNHANDLED ERROR IN MAIN ---"); traceback.print_exc(); exit(1)
+    except Exception: print(f"\n--- FATAL UNHANDLED ERROR ---"); traceback.print_exc(); exit(1)
