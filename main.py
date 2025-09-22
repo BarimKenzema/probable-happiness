@@ -1,5 +1,5 @@
 # FILE: main.py (for your SECOND repo: v2ray-refiner)
-# FINAL SCRIPT v39: Refiner & Special Categorizer
+# FINAL SCRIPT v40: Refiner with Corrected Combined Logic
 
 import os, json, re, base64, time, traceback, socket
 import requests
@@ -9,7 +9,7 @@ import geoip2.database
 from dns import resolver, exception as dns_exception
 import ssl
 
-print("--- ADVANCED REFINER & CATEGORIZER v39 START ---")
+print("--- ADVANCED REFINER & CATEGORIZER v40 START ---")
 
 # --- CONFIGURATION ---
 CONFIG_CHUNK_SIZE = 444
@@ -17,7 +17,7 @@ MAX_TEST_WORKERS = 100
 TEST_TIMEOUT = 4
 SMALL_COUNTRY_THRESHOLD = 44
 
-# --- HELPER FUNCTIONS ---
+# --- HELPER FUNCTIONS (UNCHANGED) ---
 def setup_directories():
     import shutil
     dirs = ['./splitted', './subscribe', './protocols', './networks', './countries']
@@ -114,7 +114,7 @@ def main():
     setup_directories()
     
     # --- Stage 1: Download pre-filtered configs from Repo A ---
-    # !!! CHANGE 'YOUR_GITHUB_USERNAME' and 'v2ray-collector' !!!
+    # !!! IMPORTANT: CHANGE 'YOUR_GITHUB_USERNAME' and 'v2ray-collector' !!!
     REFINER_SOURCE_URL = "https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/v2ray-collector/main/filtered-for-refiner.txt"
     
     print(f"--- Downloading PRE-FILTERED configs from collector: {REFINER_SOURCE_URL} ---")
@@ -150,8 +150,8 @@ def main():
 
     final_configs = process_and_title_configs(high_quality_configs, geoip_reader)
 
-    # --- Stage 3: Perform new, advanced categorization ---
-    print("\n--- Performing Advanced Categorization ---")
+    # --- Stage 3: Perform standard categorization ---
+    print("\n--- Performing Standard Categorization ---")
     by_protocol = {p: [] for p in ["vless", "vmess", "trojan", "ss", "reality"]}
     by_network = {'tcp': [], 'ws': [], 'grpc': []}
     by_country = {}
@@ -172,32 +172,38 @@ def main():
                 by_country[country_code].append(config)
         except Exception: continue
 
+    # Write standard category files for general use
     for p, clist in by_protocol.items(): write_chunked_subscription_files(f'./protocols/{p}', clist)
     for n, clist in by_network.items(): write_chunked_subscription_files(f'./networks/{n}', clist)
+    for c, clist in by_country.items(): write_chunked_subscription_files(f'./countries/{c}', clist)
 
-    # --- Stage 4: Create special subscription files as requested ---
-    if 'tr' in by_country:
-        print(f"Creating dedicated file for Turkey (TR) with {len(by_country['tr'])} configs.")
-        write_chunked_subscription_files('./countries/tr', by_country['tr'])
-    if 'ir' in by_country:
-        print(f"Creating dedicated file for Iran (IR) with {len(by_country['ir'])} configs.")
-        write_chunked_subscription_files('./countries/ir', by_country['ir'])
-        
-    print(f"\n--- Creating Special 'Combined' Subscription ---")
+    # --- Stage 4: Create Special Combined Subscription (UPDATED LOGIC) ---
+    print(f"\n--- Creating Special Combined Subscription File ---")
+    
+    # Use a set to automatically handle duplicates
     combined_configs = set()
 
+    # 1. Add ALL REALITY servers
     if by_protocol['reality']:
         print(f"Adding {len(by_protocol['reality'])} REALITY configs to the special mix.")
         combined_configs.update(by_protocol['reality'])
     
+    # 2. Add ALL Turkey servers
+    if 'tr' in by_country:
+        print(f"Adding {len(by_country['tr'])} Turkey (TR) configs to the special mix.")
+        combined_configs.update(by_country['tr'])
+
+    # 3. Add all servers from countries with fewer than 44 configs
     for country_code, config_list in by_country.items():
-        if country_code not in ['tr', 'ir'] and len(config_list) < SMALL_COUNTRY_THRESHOLD:
+        if len(config_list) < SMALL_COUNTRY_THRESHOLD:
             print(f"Adding {len(config_list)} configs from small country '{country_code.upper()}' to the special mix.")
             combined_configs.update(config_list)
     
     if combined_configs:
-        print(f"Total unique configs in the special mix: {len(combined_configs)}")
-        write_chunked_subscription_files('./subscribe/combined_special', sorted(list(combined_configs)))
+        # Convert set to a sorted list for consistent output
+        final_combined_list = sorted(list(combined_configs))
+        print(f"Total unique configs in the special combined file: {len(final_combined_list)}")
+        write_chunked_subscription_files('./subscribe/combined_special', final_combined_list)
     else:
         print("No configs met the criteria for the special combined subscription.")
 
