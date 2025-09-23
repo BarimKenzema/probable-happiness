@@ -1,5 +1,5 @@
 # FILE: main.py (for your SECOND repo: v2ray-refiner)
-# FINAL SCRIPT v40: Refiner with Corrected Combined Logic
+# FINAL SCRIPT v40-Plus: Refiner with Balanced Filtering and New Outputs
 
 import os, json, re, base64, time, traceback, socket
 import requests
@@ -9,15 +9,15 @@ import geoip2.database
 from dns import resolver, exception as dns_exception
 import ssl
 
-print("--- ADVANCED REFINER & CATEGORIZER v40 START ---")
+print("--- ADVANCED REFINER & CATEGORIZER v40-Plus START ---")
 
 # --- CONFIGURATION ---
-CONFIG_CHUNK_SIZE = 4444
+CONFIG_CHUNK_SIZE = 444
 MAX_TEST_WORKERS = 100
 TEST_TIMEOUT = 4
 SMALL_COUNTRY_THRESHOLD = 44
 
-# --- HELPER FUNCTIONS (UNCHANGED) ---
+# --- HELPER FUNCTIONS (From v40 - Balanced Filtering) ---
 def setup_directories():
     import shutil
     dirs = ['./splitted', './subscribe', './protocols', './networks', './countries']
@@ -114,7 +114,6 @@ def main():
     setup_directories()
     
     # --- Stage 1: Download pre-filtered configs from Repo A ---
-    # !!! IMPORTANT: CHANGE 'YOUR_GITHUB_USERNAME' and 'v2ray-collector' !!!
     REFINER_SOURCE_URL = "https://raw.githubusercontent.com/BarimKenzema/Haj-Karim/refs/heads/main/filtered-for-refiner.txt"
     
     print(f"--- Downloading PRE-FILTERED configs from collector: {REFINER_SOURCE_URL} ---")
@@ -130,7 +129,7 @@ def main():
 
     if not configs_to_test: print("FATAL: Config source file was empty. Exiting."); return
 
-    # --- Stage 2: Run advanced tests and add geo-titles ---
+    # --- Stage 2: Run balanced tests and add geo-titles ---
     db_path = "./geoip.mmdb"
     if not os.path.exists(db_path):
         print("INFO: GeoIP database not found. Downloading...")
@@ -153,14 +152,14 @@ def main():
     # --- Stage 3: Perform standard categorization ---
     print("\n--- Performing Standard Categorization ---")
     by_protocol = {p: [] for p in ["vless", "vmess", "trojan", "ss", "reality"]}
-    by_network = {'tcp': [], 'ws': [], 'grpc': []}
+    by_network = {'tcp': [], 'ws': [], 'grpc': [], 'http': []}
     by_country = {}
 
     for config in final_configs:
         try:
             proto = config.split('://')[0]
             if proto in by_protocol: by_protocol[proto].append(config)
-            if 'reality' in config.lower(): by_protocol['reality'].append(config)
+            if 'reality' in config.lower(): by_protocol[proto].append(config)
             
             parsed = urlparse(config)
             net = parse_qs(parsed.query).get('type', ['tcp'])[0].lower()
@@ -172,43 +171,48 @@ def main():
                 by_country[country_code].append(config)
         except Exception: continue
 
-    # Write standard category files for general use
     for p, clist in by_protocol.items(): write_chunked_subscription_files(f'./protocols/{p}', clist)
     for n, clist in by_network.items(): write_chunked_subscription_files(f'./networks/{n}', clist)
     for c, clist in by_country.items(): write_chunked_subscription_files(f'./countries/{c}', clist)
 
     # --- Stage 4: Create Special Combined Subscription (UPDATED LOGIC) ---
     print(f"\n--- Creating Special Combined Subscription File ---")
-    
-    # Use a set to automatically handle duplicates
     combined_configs = set()
 
-    # 1. Add ALL REALITY servers
     if by_protocol['reality']:
         print(f"Adding {len(by_protocol['reality'])} REALITY configs to the special mix.")
         combined_configs.update(by_protocol['reality'])
     
-    # 2. Add ALL Turkey servers
     if 'tr' in by_country:
         print(f"Adding {len(by_country['tr'])} Turkey (TR) configs to the special mix.")
         combined_configs.update(by_country['tr'])
 
-    # 3. Add all servers from countries with fewer than 44 configs
+    # --- THIS IS THE FIRST NEW BLOCK ---
+    if by_network['grpc']:
+        print(f"Adding {len(by_network['grpc'])} GRPC configs to the special mix.")
+        combined_configs.update(by_network['grpc'])
+    # --- END OF FIRST NEW BLOCK ---
+
     for country_code, config_list in by_country.items():
         if len(config_list) < SMALL_COUNTRY_THRESHOLD:
             print(f"Adding {len(config_list)} configs from small country '{country_code.upper()}' to the special mix.")
             combined_configs.update(config_list)
     
     if combined_configs:
-        # Convert set to a sorted list for consistent output
-        final_combined_list = sorted(list(combined_configs))
+        # Sort the final list based on the original high-quality sort order
+        final_combined_list = sorted(list(combined_configs), key=lambda c: final_configs.index(c))
         print(f"Total unique configs in the special combined file: {len(final_combined_list)}")
         write_chunked_subscription_files('./subscribe/combined_special', final_combined_list)
     else:
         print("No configs met the criteria for the special combined subscription.")
 
+    # --- THIS IS THE SECOND NEW BLOCK ---
+    print("\n--- Writing ALL refined configs to a single subscription file ---")
+    write_chunked_subscription_files('./subscribe/all_refined', final_configs)
+    # --- END OF SECOND NEW BLOCK ---
+
     print("\n--- SCRIPT FINISHED SUCCESSFULLY ---")
 
 if __name__ == "__main__":
     try: main()
-    except Exception: print(f"\n--- FATAL UNHANDLED ERROR IN MAIN ---"); traceback.print_exc(); exit(1)
+    except Exception: print(f"\n--- FATAL UNHANDLED ERROR ---"); traceback.print_exc(); exit(1)
