@@ -142,7 +142,7 @@ def write_chunked_subscription_files(base_filepath, configs):
 def main():
     setup_directories()
     
-    REFINER_SOURCE_URL = "https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/v2ray-collector/main/filtered-for-refiner.txt"
+    REFINER_SOURCE_URL = "https://raw.githubusercontent.com/BarimKenzema/Haj-Karim/refs/heads/main/filtered-for-refiner.txt"
     try:
         response = requests.get(REFINER_SOURCE_URL, timeout=20)
         response.raise_for_status()
