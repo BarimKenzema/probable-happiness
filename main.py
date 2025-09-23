@@ -1,5 +1,5 @@
 # FILE: main.py (for your SECOND repo: v2ray-refiner)
-# FINAL SCRIPT v42: Advanced Refiner with "All-In-One" File Output
+# FINAL SCRIPT v43: Advanced Refiner with GRPC added to Special Mix
 
 import os, json, re, base64, time, traceback, socket, ssl
 import requests
@@ -8,7 +8,7 @@ import concurrent.futures
 import geoip2.database
 from dns import resolver, exception as dns_exception
 
-print("--- ADVANCED REFINER v42 (ALL-IN-ONE OUTPUT) START ---")
+print("--- ADVANCED REFINER v43 (GRPC IN SPECIAL MIX) START ---")
 
 # --- CONFIGURATION ---
 CONFIG_CHUNK_SIZE = 4444
@@ -20,7 +20,7 @@ BANNED_ASNS = {
     "AS15169", "AS16509", "AS8075", "AS14618", "AS20473", "AS24940", "AS14061"
 } # Google, AWS, Azure, DigitalOcean, Vultr, Hetzner, Linode
 
-# --- HELPER FUNCTIONS ---
+# --- HELPER FUNCTIONS (UNCHANGED) ---
 def setup_directories():
     import shutil
     dirs = ['./splitted', './subscribe', './protocols', './networks', './countries']
@@ -142,7 +142,7 @@ def write_chunked_subscription_files(base_filepath, configs):
 def main():
     setup_directories()
     
-    REFINER_SOURCE_URL = "https://raw.githubusercontent.com/BarimKenzema/Haj-Karim/refs/heads/main/filtered-for-refiner.txt"
+    REFINER_SOURCE_URL = "https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/v2ray-collector/main/filtered-for-refiner.txt"
     try:
         response = requests.get(REFINER_SOURCE_URL, timeout=20)
         response.raise_for_status()
@@ -186,34 +186,56 @@ def main():
     final_configs_titled = process_and_title_configs(final_configs_sorted, country_reader)
     
     by_protocol = {p: [] for p in ["vless", "vmess", "trojan", "ss", "reality"]}
+    by_network = {'tcp': [], 'ws': [], 'grpc': [], 'http': []}
     by_country = {}
+
     for config in final_configs_titled:
         try:
             proto = config.split('://')[0]
             if proto in by_protocol: by_protocol[proto].append(config)
             if 'reality' in config.lower(): by_protocol['reality'].append(config)
-            country_code = urlparse(config).fragment.split('-')[0].lower()
+            
+            parsed = urlparse(config)
+            net = parse_qs(parsed.query).get('type', ['tcp'])[0].lower()
+            if net in by_network: by_network[net].append(config)
+            
+            country_code = parsed.fragment.split('-')[0].lower()
             if country_code:
                 if country_code not in by_country: by_country[country_code] = []
                 by_country[country_code].append(config)
         except Exception: continue
     
     for p, clist in by_protocol.items(): write_chunked_subscription_files(f'./protocols/{p}', clist)
+    for n, clist in by_network.items(): write_chunked_subscription_files(f'./networks/{n}', clist)
     for c, clist in by_country.items(): write_chunked_subscription_files(f'./countries/{c}', clist)
 
     print(f"\n--- Creating Special Combined Subscription File ---")
     combined_configs = set()
-    if by_protocol['reality']: combined_configs.update(by_protocol['reality'])
-    if 'tr' in by_country: combined_configs.update(by_country['tr'])
+    
+    if by_protocol['reality']: 
+        print(f"Adding {len(by_protocol['reality'])} REALITY configs to the special mix.")
+        combined_configs.update(by_protocol['reality'])
+    
+    if 'tr' in by_country: 
+        print(f"Adding {len(by_country['tr'])} Turkey (TR) configs to the special mix.")
+        combined_configs.update(by_country['tr'])
+    
+    # --- THIS IS THE ONLY ADDED BLOCK ---
+    if by_network['grpc']:
+        print(f"Adding {len(by_network['grpc'])} GRPC configs to the special mix.")
+        combined_configs.update(by_network['grpc'])
+    # ------------------------------------
+
     for country_code, config_list in by_country.items():
-        if len(config_list) < SMALL_COUNTRY_THRESHOLD: combined_configs.update(config_list)
+        if len(config_list) < SMALL_COUNTRY_THRESHOLD: 
+            print(f"Adding {len(config_list)} configs from small country '{country_code.upper()}' to the special mix.")
+            combined_configs.update(config_list)
     
     if combined_configs:
         final_combined_list = sorted(list(combined_configs), key=lambda c: final_configs_titled.index(c))
         print(f"Total unique configs in the special combined file: {len(final_combined_list)}")
         write_chunked_subscription_files('./subscribe/combined_special', final_combined_list)
 
-    # --- NEW: Write all high-quality configs to a single file ---
     print("\n--- Writing ALL refined configs to a single subscription file ---")
     write_chunked_subscription_files('./subscribe/all_refined', final_configs_titled)
 
