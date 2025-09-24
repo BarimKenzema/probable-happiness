@@ -1,4 +1,4 @@
-# FINAL SCRIPT v41-LOCAL: Local Refiner with Corrected Combined Logic
+# FINAL SCRIPT v43-LOCAL-HTTP-PROBE: Refiner with a smarter HTTP probe test
 
 import os, json, re, base64, time, traceback, socket
 import requests
@@ -8,12 +8,12 @@ import geoip2.database
 from dns import resolver, exception as dns_exception
 import ssl
 
-print("--- LOCAL REFINER & CATEGORIZER v41 START ---")
+print("--- LOCAL REFINER & CATEGORIZER v43-LOCAL-HTTP-PROBE START ---")
 
 # --- CONFIGURATION ---
 CONFIG_CHUNK_SIZE = 4444
 MAX_TEST_WORKERS = 100
-TEST_TIMEOUT = 5 # Increased timeout slightly for potentially slower home networks
+TEST_TIMEOUT = 5
 SMALL_COUNTRY_THRESHOLD = 44
 
 # --- HELPER FUNCTIONS ---
@@ -42,6 +42,7 @@ def get_ips(node):
     return None
 
 def is_cdn_domain(domain):
+    # This function remains unchanged
     if domain in cdn_cache: return cdn_cache[domain]
     try:
         res = resolver.Resolver(); res.nameservers = ["1.1.1.1", "8.8.8.8"]
@@ -53,15 +54,26 @@ def is_cdn_domain(domain):
     except (dns_exception.DNSException, Exception): pass
     cdn_cache[domain] = False; return False
 
+# --- !!! THIS IS THE UPGRADED TEST FUNCTION !!! ---
 def test_single_config(config):
     try:
-        parsed_url = urlparse(config); host = parsed_url.hostname; port = parsed_url.port or 443
+        parsed_url = urlparse(config)
+        host = parsed_url.hostname
+        port = parsed_url.port or 443
         if not host: return None
-        is_cdn = is_cdn_domain(host)
-        start_time = time.time()
-        context = ssl.create_default_context(); context.check_hostname = False; context.verify_mode = ssl.CERT_NONE
+
+        params = parse_qs(parsed_url.query)
+        network_type = params.get('type', ['tcp'])[0].lower()
         
-        # We get the real IP address to connect to
+        # We only perform the advanced HTTP probe on WS and gRPC configs,
+        # as TCP and REALITY configs will not respond like a web server.
+        requires_http_probe = network_type in ['ws', 'grpc']
+
+        start_time = time.time()
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        
         ips = get_ips(host)
         if not ips: return None
         ip_to_connect = ips[0]
@@ -69,24 +81,49 @@ def test_single_config(config):
         with socket.create_connection((ip_to_connect, port), timeout=TEST_TIMEOUT) as sock:
             with context.wrap_socket(sock, server_hostname=host) as ssock:
                 latency = int((time.time() - start_time) * 1000)
-                return {"config": config, "host": host, "latency": latency, "is_cdn": is_cdn, "protocol": parsed_url.scheme}
-    except (socket.timeout, ConnectionRefusedError, OSError, ssl.SSLError, Exception): return None
+
+                # --- NEW HTTP PROBE LOGIC ---
+                if requires_http_probe:
+                    # We send a basic HTTP GET request to see if the server responds like a real web server.
+                    # This helps filter out servers that are easily detected by DPI.
+                    http_request = (
+                        f"GET / HTTP/1.1\r\n"
+                        f"Host: {host}\r\n"
+                        f"Connection: close\r\n"
+                        f"User-Agent: Mozilla/5.0\r\n\r\n"
+                    )
+                    ssock.sendall(http_request.encode('utf-8'))
+                    
+                    # Try to receive a small amount of data. A real web server will respond.
+                    response = ssock.recv(1024)
+                    if not response:
+                        # If we get no response, it's likely a lazy-configured V2Ray server. We reject it.
+                        return None
+                # --- END OF NEW LOGIC ---
+
+                # If the test passes (or wasn't required), we return the config.
+                return {"config": config, "host": host, "latency": latency, "protocol": parsed_url.scheme}
+
+    except (socket.timeout, ConnectionRefusedError, OSError, ssl.SSLError, Exception):
+        return None
 
 def advanced_filter_and_test(all_configs):
-    print(f"\n--- Advanced Filtering & Testing {len(all_configs)} Configs from your location ---")
+    print(f"\n--- Advanced Filtering & Testing {len(all_configs)} Configs (with HTTP Probe) ---")
     unique_configs = list(set(all_configs)); good_configs = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_TEST_WORKERS) as executor:
         future_to_config = {executor.submit(test_single_config, config): config for config in unique_configs}
         for i, future in enumerate(concurrent.futures.as_completed(future_to_config)):
-            if (i + 1) % 100 == 0: print(f"Tested {i+1}/{len(unique_configs)} | Found {len(good_configs)} working configs")
+            if (i + 1) % 100 == 0: print(f"Tested {i+1}/{len(unique_configs)} | Found {len(good_configs)} promising configs")
             result = future.result()
             if result: good_configs.append(result)
 
-    # Sort by latency, but prioritize REALITY and non-CDN servers as they are often faster direct links
-    good_configs.sort(key=lambda x: (x['protocol'] != 'reality', not x['is_cdn'], x['latency']))
+    # Simplified sorting by protocol (REALITY first) and then latency
+    good_configs.sort(key=lambda x: (x['protocol'] != 'reality', x['latency']))
     final_sorted_configs = [item['config'] for item in good_configs]
-    print(f"--- Advanced filtering complete. Found {len(final_sorted_configs)} working configs from Iran. ---")
+    print(f"--- Advanced filtering complete. Found {len(final_sorted_configs)} high-quality configs. ---")
     return final_sorted_configs
+
+# --- NO CHANGES TO THE FUNCTIONS BELOW THIS LINE ---
 
 def process_and_title_configs(configs_to_process, geoip_reader):
     print(f"\n--- Adding Geo-Titles to {len(configs_to_process)} configs... ---"); processed_configs = []
@@ -115,11 +152,17 @@ def write_chunked_subscription_files(base_filepath, configs):
         content = base64.b64encode("\n".join(chunk).encode("utf-8")).decode("utf-8")
         with open(filepath, "w", encoding="utf-8") as f: f.write(content)
 
-# --- MAIN EXECUTION ---
+def write_single_subscription_file(filepath, configs):
+    if not configs: return
+    print(f"--- Creating a single subscription file with all {len(configs)} configs at: {filepath} ---")
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    content = base64.b64encode("\n".join(configs).encode("utf-8")).decode("utf-8")
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(content)
+
 def main():
     setup_directories()
     
-    # This script now reads the file downloaded by local_runner.py
     LOCAL_SOURCE_FILE = "filtered-for-refiner.txt"
     print(f"--- Loading PRE-FILTERED configs from local file: {LOCAL_SOURCE_FILE} ---")
     
@@ -129,7 +172,7 @@ def main():
             configs_to_test.update(line.strip() for line in f if line.strip())
         print(f"Successfully loaded {len(configs_to_test)} pre-filtered configs to test.")
     except FileNotFoundError:
-        print(f"FATAL: The source file '{LOCAL_SOURCE_FILE}' was not found. Did the download fail?")
+        print(f"FATAL: The source file '{LOCAL_SOURCE_FILE}' was not found.")
         return
 
     if not configs_to_test: print("FATAL: Config source file was empty. Exiting."); return
@@ -152,8 +195,10 @@ def main():
         except Exception as e: print(f"ERROR: Could not load GeoIP database. Error: {e}")
 
     final_configs = process_and_title_configs(high_quality_configs, geoip_reader)
+    if not final_configs: print("INFO: No configs survived the titling process. Exiting."); return
 
-    # Categorization Logic
+    write_single_subscription_file('./subscribe/all_verified', final_configs)
+    
     print("\n--- Performing Standard Categorization ---")
     by_protocol = {p: [] for p in ["vless", "vmess", "trojan", "ss", "reality"]}
     by_network = {'tcp': [], 'ws': [], 'grpc': []}
@@ -179,16 +224,12 @@ def main():
     for n, clist in by_network.items(): write_chunked_subscription_files(f'./networks/{n}', clist)
     for c, clist in by_country.items(): write_chunked_subscription_files(f'./countries/{c}', clist)
 
-    # Special Combined Subscription Logic
     print(f"\n--- Creating Special Combined Subscription File ---")
     combined_configs = set()
-    if by_protocol['reality']:
-        combined_configs.update(by_protocol['reality'])
-    if 'tr' in by_country:
-        combined_configs.update(by_country['tr'])
+    if by_protocol['reality']: combined_configs.update(by_protocol['reality'])
+    if 'tr' in by_country: combined_configs.update(by_country['tr'])
     for country_code, config_list in by_country.items():
-        if len(config_list) < SMALL_COUNTRY_THRESHOLD:
-            combined_configs.update(config_list)
+        if len(config_list) < SMALL_COUNTRY_THRESHOLD: combined_configs.update(config_list)
     
     if combined_configs:
         final_combined_list = sorted(list(combined_configs))
